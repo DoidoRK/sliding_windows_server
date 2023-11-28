@@ -8,46 +8,61 @@
 #include <unistd.h>
 #include <pthread.h>
 #include "config.h"
+#include "types.h"
 #include "utils/network_utils.h"
-#include "libs/conio_linux.h"
 
 using namespace std;
 
 //Thread pool to reduce server memory usage.
-pthread_t thread_pool[WINDOW_SIZE];
+pthread_t window_element_thread[WINDOW_SIZE];
+
+//Creates sliding windows threads to deal with file transfer.
+// for (uint8_t i = 0; i < WINDOW_SIZE; i++)
+// {
+//     pthread_create(&window_element_thread[i],NULL, connectionThread, NULL);
+// }
+
+void uploadFile(const char *file_name){
+    cout << "Fazendo Upload de: " << file_name << endl;
+}
+
+void downloadFile(const char *file_name){
+    cout << "Fazendo Download de: " << file_name << endl;
+}
 
 int main() {
+    int serverSocket;
+    struct sockaddr_in serverAddr, clientAddr;
+    socklen_t clientAddrLen = sizeof(clientAddr);
+    operation_datagram_t operation_packet;
 
-    int server_socket, client_socket;
-    struct sockaddr_in server_addr;
+    check(
+        (serverSocket = socket(AF_INET, SOCK_DGRAM, 0)),
+        "Failed to create server's socket.\n"
+    );
 
-    clrscr();
+    memset(&serverAddr, 0, sizeof(serverAddr));
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_addr.s_addr = INADDR_ANY;
+    serverAddr.sin_port = htons(SERVER_PORT);
 
-    // //Creates sliding windows threads to deal with file transfer.
-    // for (uint8_t i = 0; i < WINDOW_SIZE; i++)
-    // {
-    //     pthread_create(&thread_pool[i],NULL, connectionThread, NULL);
-    // }
-    
-    // check((server_socket = socket(AF_INET, SOCK_STREAM, 0)), "Failed to open stream socket");
+    check(
+        (bind(serverSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr))),
+        "Failed to bind server socket.\n"
+    );
+    serverMessage(to_string(SERVER_PORT));
 
-    // /* Adresses */
-    // bzero(&server_addr, sizeof(server_addr));
-    // server_addr.sin_family = AF_INET;
-    // server_addr.sin_addr.s_addr = INADDR_ANY;
-    // server_addr.sin_port = htons(SERVER_PORT);
-    // check((bind(server_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0),"Failed to bind stream socket");
-    
-    // /* Waits for connections */
-    // check((listen(server_socket,MAX_CONNECTIONS)), "Failed to listen");
-    // if(-1 == serverMessage(to_string(SERVER_PORT))){
-    //     cout << "Failed to get server IP address!" << endl;
-    // };
+    while (1) {
+        check(
+            (recvfrom(serverSocket, &operation_packet, sizeof(operation_datagram_t), 0, (struct sockaddr*)&clientAddr, &clientAddrLen)),
+            "Failed to receive operation packet.\n"
+        );
+        char clientIP[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &clientAddr.sin_addr, clientIP, sizeof(clientIP));
+        printf("Mensagem recebida de: %s:%d\n\n", clientIP, ntohs(clientAddr.sin_port));
+        printf("Operação: %s\nArquivo: %s\n", operation_packet.operation, operation_packet.file_path);
+    }
 
-    // while (1) {
-    //     check((client_socket = accept(server_socket,(struct sockaddr *)0,0)),"Accept Failed");
-    //     int *pclient = (int*)malloc(sizeof(int));
-    //     *pclient = client_socket;
-    // }
+    close(serverSocket);
     return 0;
 }

@@ -4,6 +4,7 @@
 #include <iostream>
 #include <fstream>
 #include <string>
+#include "../libs/conio_linux.h"
 
 #define SOCKETERROR (-1)
 
@@ -18,6 +19,7 @@ int check(int exp, const char *msg) {
 }
 
 int serverMessage(string serverPort){
+    clrscr();
     string command = "hostname -I | cut -d' ' -f1";
     string ipAddress;
 
@@ -55,7 +57,10 @@ int serverMessage(string serverPort){
     cout << "|╚███╔███╔╝██║██║ ╚████║██████╔╝╚██████╔╝╚███╔███╔╝███████║|" << endl;
     cout << "| ╚══╝╚══╝ ╚═╝╚═╝  ╚═══╝╚═════╝  ╚═════╝  ╚══╝╚══╝ ╚══════╝|" << endl;
     cout << "+----------------------------------------------------------+" << endl;
-    cout << "Server Status: Online" << endl;
+    cout << "Server Status: ";
+    setfontcolor(GREEN);
+    cout << "Online" << endl;
+    setfontcolor(WHITE);
     cout << "Server IP Address: " << ipAddress << ":" << serverPort << endl;
     return 0;
 }
