@@ -20,4 +20,9 @@ void printCurrentTime(){
     cout << "Current time: " << send_time_buffer << endl;
 }
 
+int generateRandomNumber() {
+    // Generate a random number between 0 and 100
+    return rand() % 101;
+}
+
 #endif /* _TIME_UTILS_H_ */

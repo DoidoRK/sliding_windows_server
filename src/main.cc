@@ -26,6 +26,9 @@ int main() {
     socklen_t client_addr_len = sizeof(client_addr);
     operation_packet_t operation_packet;
 
+    // Seed the random number generator with the current time to simulate time out occurring
+    srand(static_cast<unsigned int>(time(nullptr)));
+
     check(
         (server_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)),
         "Failed to create server's socket.\n"
@@ -40,11 +43,10 @@ int main() {
         (bind(server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr))),
         "Failed to bind server socket.\n"
     );
-    serverMessage(to_string(SERVER_PORT));
-
 
     while (1) {
         if(!received_ftp_mode){
+            serverMessage(to_string(SERVER_PORT));
             cout << "Server is waiting for a client operation." << endl;
             check(
                 (recvfrom(server_socket, &operation_packet, sizeof(operation_packet_t), 0, (struct sockaddr*)&client_addr, &client_addr_len)),

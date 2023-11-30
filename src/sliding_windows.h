@@ -13,6 +13,8 @@
 #include "config.h"
 #include "types.h"
 #include "utils/network_utils.h"
+#include "utils/time_utils.h"
+#include <chrono>
 
 pthread_mutex_t frame_list_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t current_chunk_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -111,10 +113,9 @@ void* downloadFileThread(void* arg){
             "Download thread failed to receive recv packet.\n"
         );
         cout << "Download thread port: " << thread_port << " received data packet!" << endl;
-        cout << "Packet info:" << endl;
-        cout << "Status: " <<(recv_packet.frame.status? "ACKNOWLEDGED" : "NOT_ACKNOWLEDGED") << endl;
-        cout << "Sequence Number: " << recv_packet.sequence_number << endl;
-        cout << "Packet contents: " << recv_packet.frame.data << endl << endl;
+        cout << "Packet info: ";
+        cout << "Status: " << (recv_packet.frame.status? "ACKNOWLEDGED" : "NOT_ACKNOWLEDGED");
+        cout << " Sequence Number: " << recv_packet.sequence_number << endl << endl;
 
         current_chunk = recv_packet.sequence_number; //For window size equal to 1 to test
 
@@ -124,20 +125,24 @@ void* downloadFileThread(void* arg){
         frame_list[current_chunk] = recv_packet.frame;  //For window size equal to 1 to test
         // pthread_mutex_lock(&current_chunk_mutex);
         // pthread_mutex_unlock(&current_chunk_mutex);
-
-        cout << "Download thread port: " << thread_port << " sending ack packet!" << endl;
-        cout << "Packet info:" << endl;
-        cout << "Status: " <<(ack_packet.frame.status? "ACKNOWLEDGED" : "NOT_ACKNOWLEDGED") << endl;
-        cout << "Sequence Number: " << ack_packet.sequence_number << endl;
-        check(
-            (sendto(thread_socket, &ack_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&client_addr, sizeof(client_addr))),
-            "Download thread failed to send ack packet.\n"
-        );
-        if(current_chunk == (number_of_chunks_in_file - 1)){
-            *is_running = 0;
-            cout << "killing download thread: " << thread_port << endl;
-            cout << "File transfer finished." << endl;
-            close(thread_socket);
+        int time_out_chance = generateRandomNumber();
+        if(time_out_chance > TIMEOUT_CHANCE_PERCENT){
+            cout << "Download thread port: " << thread_port << " sending ack packet!" << endl;
+            cout << "Packet info: ";
+            cout << "Status: " << (ack_packet.frame.status? "ACKNOWLEDGED" : "NOT_ACKNOWLEDGED");
+            cout << " Sequence Number: " << ack_packet.sequence_number << endl << endl;
+            check(
+                (sendto(thread_socket, &ack_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&client_addr, sizeof(client_addr))),
+                "Download thread failed to send ack packet.\n"
+            );
+            if(current_chunk == (number_of_chunks_in_file - 1)){
+                *is_running = 0;
+                cout << "killing download thread: " << thread_port << endl;
+                cout << "File transfer finished." << endl;
+                close(thread_socket);
+            }
+        } else {
+            cout << "Download thread port: " << thread_port << " timing out for packet number: " << ack_packet.sequence_number << endl << endl;
         }
     }
     return 0;
