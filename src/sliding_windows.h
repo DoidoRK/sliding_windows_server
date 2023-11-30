@@ -44,17 +44,38 @@ void loadFramesFromFile(const char file_name[FILE_NAME_SIZE], size_t number_of_c
         frame_list[i].status = NOT_ACKNOWLEDGED; // Start frames as not acknowledged
 
         // Read data from the file into the data property
-        size_t bytesRead = fread(frame_list[i].data, sizeof(char), CHUNK_SIZE, file);
+        size_t bytes_read = fread(frame_list[i].data, sizeof(char), CHUNK_SIZE, file);
 
-        if (bytesRead < CHUNK_SIZE) {
-            // Fill the remaining bytes with zeros:
-            for (size_t j = bytesRead; j < CHUNK_SIZE; ++j) {
-                frame_list[i].data[j] = 0;
+        if (bytes_read < CHUNK_SIZE) {
+            // Fill the remaining bytes with empty spaces:
+            for (size_t j = bytes_read; j < CHUNK_SIZE; ++j) {
+                frame_list[i].data[j] = 32;
             }
         }
     }
 
     fclose(file); // Close the file after reading
+}
+
+void writeFileFromFrames(const char file_path[FILE_NAME_SIZE], size_t number_of_chunks) {
+    FILE *file = fopen(file_path, "wb"); // Open the file in binary mode for writing
+    if (file == NULL) {
+        perror("Error opening file for writing");
+        return;
+    }
+
+    // Write frames from the frame list to the file
+    for (size_t i = 0; i < number_of_chunks; ++i) {
+        size_t bytesWritten = fwrite(frame_list[i].data, sizeof(char), CHUNK_SIZE, file);
+
+        if (bytesWritten < CHUNK_SIZE) {
+            perror("Error writing to file");
+            fclose(file);
+            return;
+        }
+    }
+
+    fclose(file); // Close the file after writing
 }
 
 void uploadFile(const char *file_path);
@@ -151,6 +172,13 @@ void downloadFile(char file_name[FILE_NAME_SIZE], int server_socket, struct sock
         (sendto(server_socket, &operation_packet, sizeof(operation_packet_t), 0, (struct sockaddr*)&client_addr, sizeof(client_addr))),
         "Failed to send ack operation datagram.\n"
     );
+
+    //When all the file data is received, write the file
+    while (*is_running){}
+    string file_name_string(file_name);
+    string file_path = FILE_PATH + file_name_string;
+    writeFileFromFrames(file_path.c_str(), number_of_chunks);
+    free(frame_list);
 }
 
 #endif /* _SLIDING_WINDOWS_H_ */
