@@ -55,7 +55,7 @@ int main() {
             char clientIP[INET_ADDRSTRLEN];
             inet_ntop(AF_INET, &client_addr.sin_addr, clientIP, sizeof(clientIP));
             cout << "\n\nIncoming message from: " <<  clientIP << ":" << ntohs(client_addr.sin_port) << endl;
-            cout << "FTP Mode: " << ((operation_packet.ftp_mode == 0) ? "Upload" : "Download") << " File: " << operation_packet.file_name << " Number of chunks: " << operation_packet.number_of_chunks << endl;
+            cout << "FTP Mode: " << ((operation_packet.ftp_mode == 0) ? "Upload" : "Download") << " File: " << operation_packet.file_name << " Number of chunks: " << operation_packet.number_of_chunks_in_file << endl;
 
             switch (operation_packet.ftp_mode)
             {
@@ -68,7 +68,7 @@ int main() {
                 case UPLOAD:
                     received_ftp_mode = 1;
                     cout << "Cliente quer fazer upload:" << operation_packet.file_name << endl;
-                    downloadFile(operation_packet.file_name, server_socket, client_addr, operation_packet.number_of_chunks, &received_ftp_mode);
+                    downloadFile(operation_packet.file_name, server_socket, client_addr, operation_packet.number_of_chunks_in_file, &received_ftp_mode);
                     break;
                     
                 default:
