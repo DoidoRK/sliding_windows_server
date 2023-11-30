@@ -17,18 +17,18 @@
 #include "utils/print_utils.h"
 #include <chrono>
 
-pthread_mutex_t current_chunk_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t window_end_chunk_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t current_index_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t window_end_index_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t frame_list_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 pthread_t sliding_window[WINDOW_SIZE];
 
 frame_t* frame_list = NULL;
 int* is_running = NULL;
-size_t number_of_chunks_in_file_in_file = 0;
-size_t current_chunk = 0, window_end_chunk = 0;
+size_t frame_list_last_index = 0;
+size_t current_index_index = 0, window_end_index = 0;
 
-void loadFramesFromFile(const char file_name[FILE_NAME_SIZE], size_t number_of_chunks_in_file) {
+void loadFramesFromFile(const char file_name[FILE_NAME_SIZE], size_t frame_list_last_index) {
     FILE *file = fopen(file_name, "rb"); // Open the file in binary mode for reading
     if (file == NULL) {
         perror("Error opening file");
@@ -36,7 +36,7 @@ void loadFramesFromFile(const char file_name[FILE_NAME_SIZE], size_t number_of_c
     }
 
     // Dynamically allocate memory for the frame list
-    frame_list = (frame_t *)malloc(number_of_chunks_in_file * sizeof(frame_t));
+    frame_list = (frame_t *)malloc(frame_list_last_index * sizeof(frame_t));
     if (frame_list == NULL) {
         perror("Memory allocation failed");
         fclose(file);
@@ -44,7 +44,7 @@ void loadFramesFromFile(const char file_name[FILE_NAME_SIZE], size_t number_of_c
     }
 
     // Read frames from the file into the dynamically allocated frame list
-    for (size_t i = 0; i < number_of_chunks_in_file; ++i) {
+    for (size_t i = 0; i < frame_list_last_index; ++i) {
         frame_list[i].status = NOT_ACKNOWLEDGED; // Start frames as not acknowledged
 
         // Read data from the file into the data property
@@ -61,7 +61,7 @@ void loadFramesFromFile(const char file_name[FILE_NAME_SIZE], size_t number_of_c
     fclose(file); // Close the file after reading
 }
 
-void writeFileFromFrames(const char file_path[FILE_NAME_SIZE], size_t number_of_chunks_in_file) {
+void writeFileFromFrames(const char file_path[FILE_NAME_SIZE], size_t frame_list_last_index) {
     FILE *file = fopen(file_path, "wb"); // Open the file in binary mode for writing
     if (file == NULL) {
         perror("Error opening file for writing");
@@ -69,7 +69,7 @@ void writeFileFromFrames(const char file_path[FILE_NAME_SIZE], size_t number_of_
     }
 
     // Write frames from the frame list to the file
-    for (size_t i = 0; i < number_of_chunks_in_file; ++i) {
+    for (size_t i = 0; i < frame_list_last_index; ++i) {
         size_t bytesWritten = fwrite(frame_list[i].data, sizeof(char), CHUNK_SIZE, file);
 
         if (bytesWritten < CHUNK_SIZE) {
@@ -90,7 +90,7 @@ void uploadFile(const char *file_path);
 //Download Proccess
 void* downloadFileThread(void* arg){
     uint16_t thread_port = *((uint16_t*)arg);
-    int thread_socket;
+    int thread_socket, thread_status = WAITING_FOR_DATA;
     struct sockaddr_in server_addr, client_addr;
     socklen_t client_addr_len = sizeof(client_addr);
     data_packet_t recv_packet, ack_packet;
@@ -102,58 +102,103 @@ void* downloadFileThread(void* arg){
 
     memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
-    // server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
     server_addr.sin_port = htons(thread_port);
+
+    struct timeval timeout;
+    timeout.tv_sec = SOCKET_TIMEOUT_IN_SECONDS;
+    timeout.tv_usec = SOCKET_TIMEOUT_IN_MICROSSECONDS;
+    check(
+        (setsockopt (thread_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout))),
+        "Failed to set download thread socket receive timeout"
+    );
 
     check(
         (bind(thread_socket, (struct sockaddr*)&server_addr, sizeof(server_addr))),
         "Failed to bind download thread socket.\n"
     );
 
+    int sequence_number;
+    int recv_result;
     while (*is_running)
     {
-        check(
-            (recvfrom(thread_socket, &recv_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&client_addr, &client_addr_len)),
-            "Download thread failed to receive recv packet.\n"
-        );
-        printDataPacket(current_chunk,number_of_chunks_in_file_in_file,thread_port,recv_packet, RECV_DATA_PACKET);
+        if(window_end_index - current_index_index < WINDOW_SIZE){ //Checks if sequence number is inside window
+            switch (thread_status)
+            {
+                case WAITING_FOR_DATA:
+                    recv_result = recvfrom(thread_socket, &recv_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&client_addr, &client_addr_len);
+                    if (recv_result > 0) {
+                        printDataPacket(frame_list_last_index, thread_port, recv_packet, RECV_DATA_PACKET);
+                        pthread_mutex_lock(&window_end_index_mutex);
+                        window_end_index++;
+                        pthread_mutex_unlock(&window_end_index_mutex);
+                        thread_status = OPERATION_IN_BUFFER;
+                    } else {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                            // Timeout occurred
+                            printTimeOutError(current_index_index);
+                        } else {
+                            perror("Error receiving data");
+                        }
+                        pthread_mutex_lock(&window_end_index_mutex);
+                        pthread_mutex_lock(&current_index_mutex);
+                        //If there is a error receiving package ack, go back N
+                        window_end_index = current_index_index;
+                        pthread_mutex_unlock(&current_index_mutex);
+                        pthread_mutex_unlock(&window_end_index_mutex);
+                        thread_status = WAITING_FOR_DATA;
+                    }
+                    break;
 
-        ack_packet.sequence_number = recv_packet.sequence_number;
-        ack_packet.frame.status = ACKNOWLEDGED;
-
-        frame_list[current_chunk] = recv_packet.frame;  //For window size equal to 1 to test
-
-        int time_out_chance = generateRandomNumber();
-        if(time_out_chance > TIMEOUT_CHANCE_PERCENT){
-            printDataPacket(current_chunk,number_of_chunks_in_file_in_file,thread_port,ack_packet, SEND_DATA_PACKET);
-            check(
-                (sendto(thread_socket, &ack_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&client_addr, sizeof(client_addr))),
-                "Download thread failed to send ack packet.\n"
-            );
-            if(current_chunk == (number_of_chunks_in_file_in_file - 1)){
-                *is_running = 0;
-                cout << "killing download thread: " << thread_port << endl;
-                cout << "File transfer finished." << endl;
-                close(thread_socket);
+                case OPERATION_IN_BUFFER:
+                        sequence_number = recv_packet.sequence_number;
+                        pthread_mutex_lock(&frame_list_mutex);
+                        //Current chunk receives incoming data and is set to acknowledged.
+                        frame_list[ack_packet.sequence_number] = recv_packet.frame;  
+                        frame_list[ack_packet.sequence_number].status = ACKNOWLEDGED;
+                        pthread_mutex_unlock(&frame_list_mutex);
+                        thread_status = SEND_DATA_PACKET;
+                    break;
+                
+                default:    //Default state for download thread is sending ACK packet
+                    //Sends ACK
+                    ack_packet.sequence_number = sequence_number;
+                    ack_packet.frame.status = ACKNOWLEDGED;
+                    printDataPacket(frame_list_last_index, thread_port, ack_packet, SEND_DATA_PACKET);
+                    int send_ack_success_chance = generateRandomNumber();
+                    if(send_ack_success_chance > ERROR_IN_COMM_CHANCE_PERCENT){
+                        check(
+                            (sendto(thread_socket, &ack_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&client_addr, sizeof(client_addr))),
+                            "Download thread failed to send ack packet.\n"
+                        );
+                        if(current_index_index == frame_list_last_index){
+                            *is_running = 0;
+                            cout << "killing download thread: " << thread_port << endl;
+                            cout << "File transfer finished." << endl;
+                            close(thread_socket);
+                        }
+                    } else {
+                        printTimeOutError(ack_packet.sequence_number);
+                    }
+                    thread_status = WAITING_FOR_DATA;
+                    break;
             }
-        } else {
-            printTimeOutError(ack_packet.sequence_number);
         }
     }
     return 0;
 }
 
-void downloadFile(char file_name[FILE_NAME_SIZE], int server_socket, struct sockaddr_in client_addr, size_t number_of_chunks_in_file, int *received_ftp_mode){
+void downloadFile(char file_name[FILE_NAME_SIZE], int server_socket, struct sockaddr_in client_addr, size_t frame_list_last_index, int *received_ftp_mode){
     operation_packet_t operation_packet;
 
     //Gets file size.
-    number_of_chunks_in_file_in_file = number_of_chunks_in_file;
+    frame_list_last_index = frame_list_last_index;
 
     //Prepares file buffer to receive incoming data.
-    frame_list = (frame_t *)malloc(number_of_chunks_in_file * sizeof(frame_t));
+    frame_list = (frame_t *)malloc(frame_list_last_index * sizeof(frame_t));
     is_running = received_ftp_mode;
     operation_packet.ftp_mode = UPLOAD;
-    operation_packet.number_of_chunks_in_file = number_of_chunks_in_file;
+    operation_packet.file_size_in_chunks = frame_list_last_index;
     strcpy(operation_packet.file_name,file_name);
 
     //Creates server packets to handle data packets
@@ -177,7 +222,7 @@ void downloadFile(char file_name[FILE_NAME_SIZE], int server_socket, struct sock
     while (*is_running){}
     string file_name_string(file_name);
     string file_path = FILE_PATH + file_name_string;
-    writeFileFromFrames(file_path.c_str(), number_of_chunks_in_file);
+    writeFileFromFrames(file_path.c_str(), frame_list_last_index);
     free(frame_list);
 }
 
