@@ -118,87 +118,94 @@ void* downloadFileThread(void* arg){
         "Failed to bind download thread socket.\n"
     );
 
-    int sequence_number;
+    int sequence_number = 0;
+    int send_ack_success_chance;
     int recv_result;
     while (*is_running)
     {
-        if(window_end_index - current_index_index < WINDOW_SIZE){ //Checks if sequence number is inside window
-            switch (thread_status)
-            {
-                case WAITING_FOR_DATA:
-                    recv_result = recvfrom(thread_socket, &recv_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&client_addr, &client_addr_len);
-                    if (recv_result > 0) {
-                        printDataPacket(frame_list_last_index, thread_port, recv_packet, RECV_DATA_PACKET);
+        switch (thread_status)
+        {
+            case WAITING_FOR_DATA:
+                recv_result = recvfrom(thread_socket, &recv_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&client_addr, &client_addr_len);
+                if (recv_result > 0) {
+                    printDataPacket(frame_list_last_index, thread_port, recv_packet, RECV_DATA_PACKET);
+                    sequence_number = recv_packet.sequence_number;
+                    if(window_end_index - current_index_index < WINDOW_SIZE){ //Checks if sequence number is inside window
                         pthread_mutex_lock(&window_end_index_mutex);
                         window_end_index++;
                         pthread_mutex_unlock(&window_end_index_mutex);
-                        thread_status = OPERATION_IN_BUFFER;
-                    } else {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                            // Timeout occurred
-                            printTimeOutError(current_index_index);
-                        } else {
-                            perror("Error receiving data");
-                        }
-                        pthread_mutex_lock(&window_end_index_mutex);
-                        pthread_mutex_lock(&current_index_mutex);
-                        //If there is a error receiving package ack, go back N
-                        window_end_index = current_index_index;
-                        pthread_mutex_unlock(&current_index_mutex);
-                        pthread_mutex_unlock(&window_end_index_mutex);
-                        thread_status = WAITING_FOR_DATA;
                     }
-                    break;
-
-                case OPERATION_IN_BUFFER:
-                        sequence_number = recv_packet.sequence_number;
-                        pthread_mutex_lock(&frame_list_mutex);
-                        //Current chunk receives incoming data and is set to acknowledged.
-                        frame_list[ack_packet.sequence_number] = recv_packet.frame;  
-                        frame_list[ack_packet.sequence_number].status = ACKNOWLEDGED;
-                        pthread_mutex_unlock(&frame_list_mutex);
-                        thread_status = SEND_DATA_PACKET;
-                    break;
-                
-                default:    //Default state for download thread is sending ACK packet
-                    //Sends ACK
-                    ack_packet.sequence_number = sequence_number;
-                    ack_packet.frame.status = ACKNOWLEDGED;
-                    printDataPacket(frame_list_last_index, thread_port, ack_packet, SEND_DATA_PACKET);
-                    int send_ack_success_chance = generateRandomNumber();
-                    if(send_ack_success_chance > ERROR_IN_COMM_CHANCE_PERCENT){
-                        check(
-                            (sendto(thread_socket, &ack_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&client_addr, sizeof(client_addr))),
-                            "Download thread failed to send ack packet.\n"
-                        );
-                        if(current_index_index == frame_list_last_index){
-                            *is_running = 0;
-                            cout << "killing download thread: " << thread_port << endl;
-                            cout << "File transfer finished." << endl;
-                            close(thread_socket);
-                        }
+                    thread_status = OPERATION_IN_BUFFER;
+                } else {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        // Timeout occurred
+                        printTimeOutError(thread_port, sequence_number);
                     } else {
-                        printTimeOutError(ack_packet.sequence_number);
+                        perror("Error receiving data");
                     }
+                    pthread_mutex_lock(&window_end_index_mutex);
+                    pthread_mutex_lock(&current_index_mutex);
+                    //If there is a error receiving package ack, go back N
+                    window_end_index = current_index_index;
+                    pthread_mutex_unlock(&current_index_mutex);
+                    pthread_mutex_unlock(&window_end_index_mutex);
                     thread_status = WAITING_FOR_DATA;
-                    break;
-            }
+                }
+                break;
+
+            case OPERATION_IN_BUFFER:
+                    cout << "Entrou no OPERATION_IN_BUFFER" << endl;
+                    pthread_mutex_lock(&frame_list_mutex);
+                    //Current chunk receives incoming data and is set to acknowledged.
+                    frame_list[ack_packet.sequence_number] = recv_packet.frame;  
+                    frame_list[ack_packet.sequence_number].status = ACKNOWLEDGED;
+                    pthread_mutex_unlock(&frame_list_mutex);
+                    thread_status = SENDING_DATA;
+                break;
+            
+            case SENDING_DATA:
+                //Sends ACK
+                cout << "Entrou no SENDING_DATA" << endl;
+                ack_packet.sequence_number = sequence_number;
+                ack_packet.frame.status = ACKNOWLEDGED;
+                printDataPacket(frame_list_last_index, thread_port, ack_packet, SEND_DATA_PACKET);
+                send_ack_success_chance = generateRandomNumber();
+                if(send_ack_success_chance > ERROR_IN_COMM_CHANCE_PERCENT){
+                    check(
+                        (sendto(thread_socket, &ack_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&client_addr, sizeof(client_addr))),
+                        "Download thread failed to send ack packet.\n"
+                    );
+                    if(current_index_index == frame_list_last_index){
+                        *is_running = 0;
+                        cout << "killing download thread: " << thread_port << endl;
+                        cout << "File transfer finished." << endl;
+                        close(thread_socket);
+                    }
+                } else {
+                    printSendError(thread_port,sequence_number);
+                }
+                thread_status = WAITING_FOR_DATA;
+                break;
+
+            default:
+                cout << "Thread Status desconhecido";
+                break;
         }
     }
     return 0;
 }
 
-void downloadFile(char file_name[FILE_NAME_SIZE], int server_socket, struct sockaddr_in client_addr, size_t frame_list_last_index, int *received_ftp_mode){
+void downloadFile(char file_name[FILE_NAME_SIZE], int server_socket, struct sockaddr_in client_addr, size_t file_size, int *received_ftp_mode){
     operation_packet_t operation_packet;
 
     //Gets file size.
-    frame_list_last_index = frame_list_last_index;
+    frame_list_last_index = file_size;
 
     //Prepares file buffer to receive incoming data.
-    frame_list = (frame_t *)malloc(frame_list_last_index * sizeof(frame_t));
+    frame_list = (frame_t *)malloc(file_size * sizeof(frame_t));
     is_running = received_ftp_mode;
     operation_packet.ftp_mode = UPLOAD;
-    operation_packet.file_size_in_chunks = frame_list_last_index;
+    operation_packet.file_size_in_chunks = file_size;
     strcpy(operation_packet.file_name,file_name);
 
     //Creates server packets to handle data packets
