@@ -5,8 +5,8 @@
 #define SERVER_PORT 4000
 
 //Socket timeout settings
-#define SOCKET_TIMEOUT_IN_SECONDS 2
-#define SOCKET_TIMEOUT_IN_MICROSSECONDS 0
+#define SOCKET_TIMEOUT_IN_SECONDS 0
+#define SOCKET_TIMEOUT_IN_MICROSSECONDS 100000
 //If time out time is lesser than
 // WINDOW_SIZE * DELAY_BETWEEN_THREAD_CREATION
 //Unexpected behaviour may appear

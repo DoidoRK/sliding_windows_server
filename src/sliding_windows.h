@@ -17,7 +17,7 @@
 #include "utils/print_utils.h"
 #include <chrono>
 
-pthread_mutex_t current_index_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t current_frame_index_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t window_end_index_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t frame_list_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -26,7 +26,7 @@ pthread_t sliding_window[WINDOW_SIZE];
 frame_t* frame_list = NULL;
 int* is_running = NULL;
 size_t frame_list_last_index = 0;
-size_t current_index_index = 0, window_end_index = 0;
+size_t current_frame_index = 0, window_end_index = 0;
 
 void loadFramesFromFile(const char file_name[FILE_NAME_SIZE], size_t frame_list_last_index) {
     FILE *file = fopen(file_name, "rb"); // Open the file in binary mode for reading
@@ -123,6 +123,7 @@ void* downloadFileThread(void* arg){
     int recv_result;
     while (*is_running)
     {
+        cout << "Current Index: " << current_frame_index << " Window End: " << window_end_index << endl;
         switch (thread_status)
         {
             case WAITING_FOR_DATA:
@@ -130,7 +131,7 @@ void* downloadFileThread(void* arg){
                 if (recv_result > 0) {
                     printDataPacket(frame_list_last_index, thread_port, recv_packet, RECV_DATA_PACKET);
                     sequence_number = recv_packet.sequence_number;
-                    if(window_end_index - current_index_index < WINDOW_SIZE){ //Checks if sequence number is inside window
+                    if(window_end_index - current_frame_index < WINDOW_SIZE){ //Checks if sequence number is inside window
                         pthread_mutex_lock(&window_end_index_mutex);
                         window_end_index++;
                         pthread_mutex_unlock(&window_end_index_mutex);
@@ -144,17 +145,16 @@ void* downloadFileThread(void* arg){
                         perror("Error receiving data");
                     }
                     pthread_mutex_lock(&window_end_index_mutex);
-                    pthread_mutex_lock(&current_index_mutex);
+                    pthread_mutex_lock(&current_frame_index_mutex);
                     //If there is a error receiving package ack, go back N
-                    window_end_index = current_index_index;
-                    pthread_mutex_unlock(&current_index_mutex);
+                    window_end_index = current_frame_index;
+                    pthread_mutex_unlock(&current_frame_index_mutex);
                     pthread_mutex_unlock(&window_end_index_mutex);
                     thread_status = WAITING_FOR_DATA;
                 }
                 break;
 
             case OPERATION_IN_BUFFER:
-                    cout << "Entrou no OPERATION_IN_BUFFER" << endl;
                     pthread_mutex_lock(&frame_list_mutex);
                     //Current chunk receives incoming data and is set to acknowledged.
                     frame_list[ack_packet.sequence_number] = recv_packet.frame;  
@@ -165,7 +165,6 @@ void* downloadFileThread(void* arg){
             
             case SENDING_DATA:
                 //Sends ACK
-                cout << "Entrou no SENDING_DATA" << endl;
                 ack_packet.sequence_number = sequence_number;
                 ack_packet.frame.status = ACKNOWLEDGED;
                 printDataPacket(frame_list_last_index, thread_port, ack_packet, SEND_DATA_PACKET);
@@ -175,7 +174,7 @@ void* downloadFileThread(void* arg){
                         (sendto(thread_socket, &ack_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&client_addr, sizeof(client_addr))),
                         "Download thread failed to send ack packet.\n"
                     );
-                    if(current_index_index == frame_list_last_index){
+                    if(current_frame_index == frame_list_last_index){
                         *is_running = 0;
                         cout << "killing download thread: " << thread_port << endl;
                         cout << "File transfer finished." << endl;
@@ -184,6 +183,9 @@ void* downloadFileThread(void* arg){
                 } else {
                     printSendError(thread_port,sequence_number);
                 }
+                pthread_mutex_lock(&current_frame_index_mutex);
+                current_frame_index++;
+                pthread_mutex_unlock(&current_frame_index_mutex);
                 thread_status = WAITING_FOR_DATA;
                 break;
 
