@@ -106,13 +106,19 @@ void* downloadFileThread(void* arg){
     server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
     server_addr.sin_port = htons(thread_port);
 
-    // struct timeval timeout;
-    // timeout.tv_sec = SOCKET_TIMEOUT_IN_SECONDS;
-    // timeout.tv_usec = SOCKET_TIMEOUT_IN_MICROSSECONDS;
-    // check(
-    //     (setsockopt (thread_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout))),
-    //     "Failed to set download thread socket receive timeout"
-    // );
+    struct timeval timeout;
+    timeout.tv_sec = SOCKET_TIMEOUT_IN_SECONDS;
+    timeout.tv_usec = SOCKET_TIMEOUT_IN_MICROSSECONDS;
+    check(
+        (setsockopt (thread_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout))),
+        "Failed to set download thread socket receive timeout"
+    );
+
+    int reuse = 1;
+    if (setsockopt(thread_socket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(int)) < 0) {
+        perror("setsockopt(SO_REUSEADDR) failed");
+        return 0;
+    }
 
     check(
         (bind(thread_socket, (struct sockaddr*)&server_addr, sizeof(server_addr))),
@@ -132,16 +138,13 @@ void* downloadFileThread(void* arg){
         switch (thread_status)
         {
             case WAITING_FOR_DATA:
-                if(frame_list_last_index > current_frame_index && (frame_list_last_index + WINDOW_SIZE) > window_end_index){
+                if(frame_list_last_index > current_frame_index && (frame_list_last_index + WINDOW_SIZE + 2) > window_end_index){
                     comm_success_chance = generateRandomNumber();
                     if(comm_success_chance > CHANCE_FOR_ERROR_IN_RECV_PERCENT){
                         recv_result = recvfrom(thread_socket, &recv_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&client_addr, &client_addr_len);
                         if (recv_result > 0) {
                             printDataPacket(current_frame_index, window_end_index, frame_list_last_index, thread_port, recv_packet, RECV_DATA_PACKET);
-                            if (recv_packet.sequence_number == (thread_data_package_index) && (thread_data_package_index) == current_frame_index)
-                            {
-                                thread_status = READ_WRITE_FRAME_BUFFER;
-                            } else if(recv_packet.sequence_number < current_frame_index){
+                            if(recv_packet.sequence_number < current_frame_index){
                                 pthread_mutex_lock(&current_frame_index_mutex);
                                 current_frame_index = recv_packet.sequence_number;
                                 pthread_mutex_unlock(&current_frame_index_mutex);
@@ -154,6 +157,7 @@ void* downloadFileThread(void* arg){
                                     i++;
                                 }
                             }
+                            thread_status = READ_WRITE_FRAME_BUFFER;
                         } else {
                             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                                 // Timeout occurred
@@ -175,7 +179,7 @@ void* downloadFileThread(void* arg){
             case READ_WRITE_FRAME_BUFFER:
                 pthread_mutex_lock(&frame_list_mutex);
                 recv_packet.frame.status = ACKNOWLEDGED;
-                frame_list[thread_data_package_index] = recv_packet.frame;
+                frame_list[recv_packet.sequence_number] = recv_packet.frame;
                 pthread_mutex_unlock(&frame_list_mutex);
                 thread_status = SENDING_DATA;
                 break;
