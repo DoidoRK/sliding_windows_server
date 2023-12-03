@@ -13,6 +13,7 @@
 #include "config.h"
 #include "types.h"
 #include "utils/network_utils.h"
+#include "utils/file_utils.h"
 #include "utils/time_utils.h"
 #include "utils/print_utils.h"
 #include <chrono>
@@ -20,11 +21,12 @@
 pthread_mutex_t current_frame_index_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t window_end_index_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t frame_list_mutex = PTHREAD_MUTEX_INITIALIZER;
+struct sockaddr_in received_client_addr;
 
 pthread_t sliding_window[WINDOW_SIZE];
 
 frame_t* frame_list = NULL;
-int* is_running = NULL;
+int is_running = 0;
 size_t frame_list_last_index = 0;
 size_t current_frame_index = 0, window_end_index = 0;
 
@@ -61,6 +63,184 @@ void loadFramesFromFile(const char file_name[FILE_NAME_SIZE], size_t frame_list_
     fclose(file); // Close the file after reading
 }
 
+//Upload proccess
+void* uploadFileThread(void* arg){
+    size_t thread_num = *((size_t*)arg);
+    uint16_t thread_port = SERVER_PORT + 1 + thread_num;
+    int thread_socket, thread_status = READ_WRITE_FRAME_BUFFER;
+    struct sockaddr_in server_addr;
+    socklen_t client_addr_len = sizeof(received_client_addr);
+    data_packet_t data_packet, ack_packet;
+
+    check(
+        (thread_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)),
+        "Failed to create upload thread's socket.\n"
+    );
+
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    server_addr.sin_port = htons(thread_port);
+
+    struct timeval timeout;
+    timeout.tv_sec = SOCKET_TIMEOUT_IN_SECONDS;
+    timeout.tv_usec = SOCKET_TIMEOUT_IN_MICROSSECONDS;
+    check(
+        (setsockopt (thread_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout))),
+        "Failed to set upload thread socket receive timeout"
+    );
+
+    int reuse = 1;
+    if (setsockopt(thread_socket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(int)) < 0) {
+        perror("setsockopt(SO_REUSEADDR) failed");
+        return 0;
+    }
+
+    check(
+        (bind(thread_socket, (struct sockaddr*)&server_addr, sizeof(server_addr))),
+        "Failed to bind upload thread socket.\n"
+    );
+
+    int recv_result, comm_success_chance;
+    size_t thread_data_package_index;
+    while (current_frame_index < frame_list_last_index)
+    {
+        pthread_mutex_lock(&current_frame_index_mutex);
+        thread_data_package_index = current_frame_index+thread_num;
+        pthread_mutex_unlock(&current_frame_index_mutex);
+        pthread_mutex_lock(&window_end_index_mutex);
+        window_end_index = current_frame_index+WINDOW_SIZE;
+        pthread_mutex_unlock(&window_end_index_mutex);
+        switch (thread_status)
+        {
+        case READ_WRITE_FRAME_BUFFER:
+            if(thread_data_package_index < frame_list_last_index){
+                data_packet.sequence_number = thread_data_package_index;
+                pthread_mutex_lock(&frame_list_mutex);
+                memcpy(&(data_packet.frame), &(frame_list[thread_data_package_index]), sizeof(frame_t));
+                pthread_mutex_unlock(&frame_list_mutex);
+                thread_status = SENDING_DATA;
+            }
+            break;
+
+        case SENDING_DATA:
+            printDataPacket(current_frame_index, window_end_index, frame_list_last_index, thread_port, data_packet, SEND_DATA_PACKET);
+            comm_success_chance = generateRandomNumber();
+            if(comm_success_chance > CHANCE_FOR_ERROR_IN_SEND_PERCENT){
+                check(
+                    (sendto(thread_socket, &data_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&received_client_addr, sizeof(received_client_addr))),
+                    "Upload thread failed to send data packet.\n"
+                );
+            } else {
+                printSendError(thread_port, data_packet.sequence_number);
+            }
+            thread_status = WAITING_FOR_DATA;
+            break;
+
+
+        case WAITING_FOR_DATA:
+            comm_success_chance = generateRandomNumber();
+            if(comm_success_chance > CHANCE_FOR_ERROR_IN_RECV_PERCENT){
+                recv_result = recvfrom(thread_socket, &ack_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&received_client_addr, &client_addr_len);
+                if (recv_result > 0) {
+                    printDataPacket(current_frame_index, window_end_index, frame_list_last_index, thread_port, ack_packet, RECV_DATA_PACKET);
+                    if (ack_packet.sequence_number == (thread_data_package_index) && (thread_data_package_index) == current_frame_index)
+                    {
+                        pthread_mutex_lock(&frame_list_mutex);
+                        frame_list[current_frame_index].status = ACKNOWLEDGED;
+                        pthread_mutex_unlock(&frame_list_mutex);
+                        thread_status = NEXT_INDEX;
+                    }
+                } else {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        // Timeout occurred
+                        printAckTimeOutError(thread_port, data_packet.sequence_number);
+                    } else {
+                        perror("Error receiving data");
+                    }
+                    thread_status = ACK_FAILED;
+                }
+            } else {
+                printAckTimeOutError(thread_port, data_packet.sequence_number);
+                thread_status = ACK_FAILED;
+            }
+            break;
+
+        case NEXT_INDEX:
+            //Only the thread for the first element in the window can move the window
+            if(thread_num == 0){
+                pthread_mutex_lock(&current_frame_index_mutex);
+                current_frame_index++;
+                pthread_mutex_unlock(&current_frame_index_mutex);
+            }
+            thread_status = READ_WRITE_FRAME_BUFFER;
+            break;
+
+        case ACK_FAILED:
+            if(data_packet.sequence_number < current_frame_index){
+                pthread_mutex_lock(&current_frame_index_mutex);
+                //If there is a error receiving package ack, go back N
+                current_frame_index = data_packet.sequence_number;
+                pthread_mutex_unlock(&current_frame_index_mutex);
+                //And reset every frame from there to NOT_ACKNOWLEDGED
+                size_t i = data_packet.sequence_number;
+                while (frame_list[i].status == ACKNOWLEDGED)
+                {
+                    pthread_mutex_lock(&frame_list_mutex);
+                    frame_list[i].status = NOT_ACKNOWLEDGED;
+                    pthread_mutex_unlock(&frame_list_mutex);
+                    i++;
+                }
+            }
+            //Repeats proccess to read data and send it.
+            thread_status = READ_WRITE_FRAME_BUFFER;
+            break;
+        
+        default:
+            cout << "Upload Thread: " << thread_port << "Unknown Thread status" << thread_status;
+            break;
+        }
+    }
+    is_running = 0;
+    return 0;
+}
+
+void uploadFile(char file_name[FILE_NAME_SIZE], int server_socket, struct sockaddr_in client_addr){
+    operation_packet_t operation_packet;
+    is_running = 1;
+    current_frame_index = 0;
+    window_end_index = 0;
+
+    //Gets the client address.
+    received_client_addr = client_addr;
+
+    string file_name_string = string(file_name);
+    string file_path = FILE_PATH + file_name_string;
+    frame_list_last_index = calculateNumChunks(file_path.c_str(), CHUNK_SIZE);
+    loadFramesFromFile(file_path.c_str(), frame_list_last_index);
+
+    operation_packet.ftp_mode = DOWNLOAD;
+    strcpy(operation_packet.file_name,file_path.c_str());
+    operation_packet.file_size_in_chunks = frame_list_last_index;
+
+    check(
+        (sendto(server_socket, &operation_packet, sizeof(operation_packet_t), 0, (struct sockaddr*)&client_addr, sizeof(client_addr))),
+        "Failed to send operation datagram.\n"
+    );
+
+    //Creates server packets to handle data packets
+    for (size_t i = 0; i < WINDOW_SIZE; i++)
+    {
+        if (pthread_create(&sliding_window[i], NULL, uploadFileThread, (void*)&i) != 0) {
+            perror("Error creating download thread.\n");
+            return;
+        }
+        usleep(DELAY_BETWEEN_THREAD_CREATION);
+    }
+    while (is_running);
+}
+
+//Download Proccess
 void writeFileFromFrames(const char file_path[FILE_NAME_SIZE], size_t frame_list_last_index) {
     FILE *file = fopen(file_path, "wb"); // Open the file in binary mode for writing
     if (file == NULL) {
@@ -82,23 +262,17 @@ void writeFileFromFrames(const char file_path[FILE_NAME_SIZE], size_t frame_list
     fclose(file); // Close the file after writing
 }
 
-//Upload Proccess
-void uploadFile(const char *file_path);
-
-
-
-//Download Proccess
 void* downloadFileThread(void* arg){
     size_t thread_num = *((size_t*)arg);
     uint16_t thread_port = SERVER_PORT + 1 + thread_num;
     int thread_socket, thread_status = WAITING_FOR_DATA;
-    struct sockaddr_in server_addr, client_addr;
-    socklen_t client_addr_len = sizeof(client_addr);
+    struct sockaddr_in server_addr;
+    socklen_t client_addr_len = sizeof(received_client_addr);
     data_packet_t recv_packet, ack_packet;
 
     check(
         (thread_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)),
-        "Failed to create server's socket.\n"
+        "Failed to create download thread's socket.\n"
     );
 
     memset(&server_addr, 0, sizeof(server_addr));
@@ -127,7 +301,7 @@ void* downloadFileThread(void* arg){
 
     int send_ack_success_chance, comm_success_chance, recv_result;
     size_t thread_data_package_index;
-    while (*is_running)
+    while (is_running)
     {
         pthread_mutex_lock(&current_frame_index_mutex);
         thread_data_package_index = current_frame_index+thread_num;
@@ -141,7 +315,7 @@ void* downloadFileThread(void* arg){
                 if(frame_list_last_index > current_frame_index && (frame_list_last_index + WINDOW_SIZE + 2) > window_end_index){
                     comm_success_chance = generateRandomNumber();
                     if(comm_success_chance > CHANCE_FOR_ERROR_IN_RECV_PERCENT){
-                        recv_result = recvfrom(thread_socket, &recv_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&client_addr, &client_addr_len);
+                        recv_result = recvfrom(thread_socket, &recv_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&received_client_addr, &client_addr_len);
                         if (recv_result > 0) {
                             printDataPacket(current_frame_index, window_end_index, frame_list_last_index, thread_port, recv_packet, RECV_DATA_PACKET);
                             if(recv_packet.sequence_number < current_frame_index){
@@ -172,7 +346,7 @@ void* downloadFileThread(void* arg){
                         thread_status = WAITING_FOR_DATA;
                     }
                 } else {
-                    *is_running = 0;
+                    is_running = 0;
                 }
                 break;
 
@@ -191,7 +365,7 @@ void* downloadFileThread(void* arg){
                 send_ack_success_chance = generateRandomNumber();
                 if(send_ack_success_chance > CHANCE_FOR_ERROR_IN_SEND_PERCENT){
                     check(
-                        (sendto(thread_socket, &ack_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&client_addr, sizeof(client_addr))),
+                        (sendto(thread_socket, &ack_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&received_client_addr, sizeof(received_client_addr))),
                         "Download thread failed to send ack packet.\n"
                     );
                 } else {
@@ -218,17 +392,20 @@ void* downloadFileThread(void* arg){
     return 0;
 }
 
-void downloadFile(char file_name[FILE_NAME_SIZE], int server_socket, struct sockaddr_in client_addr, size_t file_size, int *received_ftp_mode){
+void downloadFile(char file_name[FILE_NAME_SIZE], int server_socket, struct sockaddr_in client_addr, size_t file_size){
     operation_packet_t operation_packet;
+    is_running = 1;
     current_frame_index = 0;
     window_end_index = 0;
+
+    //Gets the client address.
+    received_client_addr = client_addr;
 
     //Gets file size.
     frame_list_last_index = file_size;
 
     //Prepares file buffer to receive incoming data.
     frame_list = (frame_t *)malloc(file_size * sizeof(frame_t));
-    is_running = received_ftp_mode;
     operation_packet.ftp_mode = UPLOAD;
     operation_packet.file_size_in_chunks = file_size;
     strcpy(operation_packet.file_name,file_name);
@@ -250,7 +427,7 @@ void downloadFile(char file_name[FILE_NAME_SIZE], int server_socket, struct sock
     );
 
     //When all the file data is received, write the file
-    while (*is_running){}
+    while (is_running){}
     string file_name_string(file_name);
     string file_path = FILE_PATH + file_name_string;
     writeFileFromFrames(file_path.c_str(), frame_list_last_index);

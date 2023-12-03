@@ -15,13 +15,8 @@
 
 using namespace std;
 
-void uploadFile(const char *file_name){
-    cout << "Fazendo Upload de: " << file_name << endl;
-}
-
-
 int main() {
-    int server_socket, received_ftp_mode = 0;
+    int server_socket;
     struct sockaddr_in server_addr, client_addr;
     socklen_t client_addr_len = sizeof(client_addr);
     operation_packet_t operation_packet;
@@ -45,36 +40,32 @@ int main() {
     );
 
     while (1) {
-        if(!received_ftp_mode){
-            serverMessage(to_string(SERVER_PORT));
-            cout << "Server is waiting for a client operation." << endl;
-            check(
-                (recvfrom(server_socket, &operation_packet, sizeof(operation_packet_t), 0, (struct sockaddr*)&client_addr, &client_addr_len)),
-                "Failed to receive operation packet.\n"
-            );
-            char clientIP[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &client_addr.sin_addr, clientIP, sizeof(clientIP));
-            cout << "\n\nIncoming message from: " <<  clientIP << ":" << ntohs(client_addr.sin_port) << endl;
-            cout << "FTP Mode: " << ((operation_packet.ftp_mode == 0) ? "Upload" : "Download") << " File: " << operation_packet.file_name << " Number of chunks: " << operation_packet.file_size_in_chunks << endl;
+        serverMessage(to_string(SERVER_PORT));
+        cout << "Server is waiting for a client operation." << endl;
+        check(
+            (recvfrom(server_socket, &operation_packet, sizeof(operation_packet_t), 0, (struct sockaddr*)&client_addr, &client_addr_len)),
+            "Failed to receive operation packet.\n"
+        );
+        char clientIP[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &client_addr.sin_addr, clientIP, sizeof(clientIP));
+        cout << "\n\nIncoming message from: " <<  clientIP << ":" << ntohs(client_addr.sin_port) << endl;
+        cout << "FTP Mode: " << ((operation_packet.ftp_mode == 0) ? "Upload" : "Download") << " File: " << operation_packet.file_name << " Number of chunks: " << operation_packet.file_size_in_chunks << endl;
 
-            switch (operation_packet.ftp_mode)
-            {
-                case DOWNLOAD:
-                    received_ftp_mode = 1;
-                    cout << "Cliente quer fazer download:" << operation_packet.file_name << endl;
-                    // uploadFile(operation_packet.file_name);
-                    break;
+        switch (operation_packet.ftp_mode)
+        {
+            case DOWNLOAD:
+                cout << "Cliente quer fazer download:" << operation_packet.file_name << endl;
+                uploadFile(operation_packet.file_name, server_socket, client_addr);
+                break;
 
-                case UPLOAD:
-                    received_ftp_mode = 1;
-                    cout << "Cliente quer fazer upload:" << operation_packet.file_name << endl;
-                    downloadFile(operation_packet.file_name, server_socket, client_addr, operation_packet.file_size_in_chunks, &received_ftp_mode);
-                    break;
-                    
-                default:
-                    cout << "Invalid operation. Please use 'upload' or 'download'." << endl;
-                    break;
-            }
+            case UPLOAD:
+                cout << "Cliente quer fazer upload:" << operation_packet.file_name << endl;
+                downloadFile(operation_packet.file_name, server_socket, client_addr, operation_packet.file_size_in_chunks);
+                break;
+                
+            default:
+                cout << "Invalid operation. Please use 'upload' or 'download'." << endl;
+                break;
         }
     }
 
