@@ -220,6 +220,8 @@ void* downloadFileThread(void* arg){
 
 void downloadFile(char file_name[FILE_NAME_SIZE], int server_socket, struct sockaddr_in client_addr, size_t file_size, int *received_ftp_mode){
     operation_packet_t operation_packet;
+    current_frame_index = 0;
+    window_end_index = 0;
 
     //Gets file size.
     frame_list_last_index = file_size;
