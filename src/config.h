@@ -21,6 +21,6 @@
 #define CHUNK_SIZE 128 //In Bytes
 #define DELAY_BETWEEN_THREAD_CREATION 10
 
-#define FILE_PATH "/home/doidobr/Projetos/Redes/sliding_windows_server/src/files/"
+#define FILE_PATH "./src/files/"
 
 #endif /* _CONFIG_H_ */
