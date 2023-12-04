@@ -139,29 +139,23 @@ void* uploadFileThread(void* arg){
 
 
         case WAITING_FOR_DATA:
-            comm_success_chance = generateRandomNumber();
-            if(comm_success_chance > CHANCE_FOR_ERROR_IN_RECV_PERCENT){
-                recv_result = recvfrom(thread_socket, &ack_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&received_client_addr, &client_addr_len);
-                if (recv_result > 0) {
-                    printDataPacket(current_frame_index, window_end_index, frame_list_last_index, thread_port, ack_packet, RECV_DATA_PACKET);
-                    if (ack_packet.sequence_number == (thread_data_package_index) && (thread_data_package_index) == current_frame_index)
-                    {
-                        pthread_mutex_lock(&frame_list_mutex);
-                        frame_list[current_frame_index].status = ACKNOWLEDGED;
-                        pthread_mutex_unlock(&frame_list_mutex);
-                        thread_status = NEXT_INDEX;
-                    }
-                } else {
-                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                        // Timeout occurred
-                        printAckTimeOutError(thread_port, data_packet.sequence_number);
-                    } else {
-                        perror("Error receiving data");
-                    }
-                    thread_status = ACK_FAILED;
+            recv_result = recvfrom(thread_socket, &ack_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&received_client_addr, &client_addr_len);
+            if (recv_result > 0) {
+                printDataPacket(current_frame_index, window_end_index, frame_list_last_index, thread_port, ack_packet, RECV_DATA_PACKET);
+                if (ack_packet.sequence_number == (thread_data_package_index) && (thread_data_package_index) == current_frame_index)
+                {
+                    pthread_mutex_lock(&frame_list_mutex);
+                    frame_list[current_frame_index].status = ACKNOWLEDGED;
+                    pthread_mutex_unlock(&frame_list_mutex);
+                    thread_status = NEXT_INDEX;
                 }
             } else {
-                printAckTimeOutError(thread_port, data_packet.sequence_number);
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    // Timeout occurred
+                    printAckTimeOutError(thread_port, data_packet.sequence_number);
+                } else {
+                    perror("Error receiving data");
+                }
                 thread_status = ACK_FAILED;
             }
             break;
@@ -266,13 +260,13 @@ void* downloadFileThread(void* arg){
     size_t thread_num = *((size_t*)arg);
     uint16_t thread_port = SERVER_PORT + 1 + thread_num;
     int thread_socket, thread_status = WAITING_FOR_DATA;
-    struct sockaddr_in server_addr;
-    socklen_t client_addr_len = sizeof(received_client_addr);
+    struct sockaddr_in server_addr, client_addr;
+    socklen_t client_addr_len = sizeof(client_addr);
     data_packet_t recv_packet, ack_packet;
 
     check(
         (thread_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)),
-        "Failed to create download thread's socket.\n"
+        "Failed to create server's socket.\n"
     );
 
     memset(&server_addr, 0, sizeof(server_addr));
@@ -315,7 +309,7 @@ void* downloadFileThread(void* arg){
                 if(frame_list_last_index > current_frame_index && (frame_list_last_index + WINDOW_SIZE + 2) > window_end_index){
                     comm_success_chance = generateRandomNumber();
                     if(comm_success_chance > CHANCE_FOR_ERROR_IN_RECV_PERCENT){
-                        recv_result = recvfrom(thread_socket, &recv_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&received_client_addr, &client_addr_len);
+                        recv_result = recvfrom(thread_socket, &recv_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&client_addr, &client_addr_len);
                         if (recv_result > 0) {
                             printDataPacket(current_frame_index, window_end_index, frame_list_last_index, thread_port, recv_packet, RECV_DATA_PACKET);
                             if(recv_packet.sequence_number < current_frame_index){
@@ -365,7 +359,7 @@ void* downloadFileThread(void* arg){
                 send_ack_success_chance = generateRandomNumber();
                 if(send_ack_success_chance > CHANCE_FOR_ERROR_IN_SEND_PERCENT){
                     check(
-                        (sendto(thread_socket, &ack_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&received_client_addr, sizeof(received_client_addr))),
+                        (sendto(thread_socket, &ack_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&client_addr, sizeof(client_addr))),
                         "Download thread failed to send ack packet.\n"
                     );
                 } else {
@@ -397,9 +391,6 @@ void downloadFile(char file_name[FILE_NAME_SIZE], int server_socket, struct sock
     is_running = 1;
     current_frame_index = 0;
     window_end_index = 0;
-
-    //Gets the client address.
-    received_client_addr = client_addr;
 
     //Gets file size.
     frame_list_last_index = file_size;
