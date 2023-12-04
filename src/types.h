@@ -44,4 +44,10 @@ typedef struct data_packet_struct {
     frame_t frame;
 } data_packet_t;
 
+// Create a struct to hold both the thread number and client address
+    struct ThreadArgs {
+        size_t thread_num;
+        struct sockaddr_in client_addr;
+    };
+
 #endif /* _TYPES_H_ */

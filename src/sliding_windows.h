@@ -21,7 +21,6 @@
 pthread_mutex_t current_frame_index_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t window_end_index_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t frame_list_mutex = PTHREAD_MUTEX_INITIALIZER;
-struct sockaddr_in received_client_addr;
 
 pthread_t sliding_window[WINDOW_SIZE];
 
@@ -64,23 +63,31 @@ void loadFramesFromFile(const char file_name[FILE_NAME_SIZE], size_t frame_list_
 }
 
 //Upload proccess
-void* uploadFileThread(void* arg){
-    size_t thread_num = *((size_t*)arg);
+void* uploadFileThread(void* arg_and_client_addr){
+    // Cast the argument back to the struct type
+    ThreadArgs* args = static_cast<ThreadArgs*>(arg_and_client_addr);
+    size_t thread_num = args->thread_num;
+    struct sockaddr_in client_addr = args->client_addr;
+    
     uint16_t thread_port = SERVER_PORT + 1 + thread_num;
     int thread_socket, thread_status = READ_WRITE_FRAME_BUFFER;
-    struct sockaddr_in server_addr;
-    socklen_t client_addr_len = sizeof(received_client_addr);
+    socklen_t client_addr_len = sizeof(client_addr);
     data_packet_t data_packet, ack_packet;
-
     check(
         (thread_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)),
-        "Failed to create upload thread's socket.\n"
+        "Failed to create server's socket.\n"
     );
 
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    server_addr.sin_port = htons(thread_port);
+    char clientIP[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &client_addr.sin_addr, clientIP, sizeof(clientIP));
+
+    memset(&client_addr, 0, sizeof(client_addr));
+    client_addr.sin_family = AF_INET;
+    client_addr.sin_port = htons(thread_port);
+    check(
+        (inet_pton(AF_INET, clientIP, &client_addr.sin_addr)),
+        "Failed to set server address.\n"
+    );
 
     struct timeval timeout;
     timeout.tv_sec = SOCKET_TIMEOUT_IN_SECONDS;
@@ -95,11 +102,6 @@ void* uploadFileThread(void* arg){
         perror("setsockopt(SO_REUSEADDR) failed");
         return 0;
     }
-
-    check(
-        (bind(thread_socket, (struct sockaddr*)&server_addr, sizeof(server_addr))),
-        "Failed to bind upload thread socket.\n"
-    );
 
     int recv_result, comm_success_chance;
     size_t thread_data_package_index;
@@ -128,7 +130,7 @@ void* uploadFileThread(void* arg){
             comm_success_chance = generateRandomNumber();
             if(comm_success_chance > CHANCE_FOR_ERROR_IN_SEND_PERCENT){
                 check(
-                    (sendto(thread_socket, &data_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&received_client_addr, sizeof(received_client_addr))),
+                    (sendto(thread_socket, &data_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&client_addr, sizeof(client_addr))),
                     "Upload thread failed to send data packet.\n"
                 );
             } else {
@@ -139,7 +141,7 @@ void* uploadFileThread(void* arg){
 
 
         case WAITING_FOR_DATA:
-            recv_result = recvfrom(thread_socket, &ack_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&received_client_addr, &client_addr_len);
+            recv_result = recvfrom(thread_socket, &ack_packet, sizeof(data_packet_t), 0, (struct sockaddr*)&client_addr, &client_addr_len);
             if (recv_result > 0) {
                 printDataPacket(current_frame_index, window_end_index, frame_list_last_index, thread_port, ack_packet, RECV_DATA_PACKET);
                 if (ack_packet.sequence_number == (thread_data_package_index) && (thread_data_package_index) == current_frame_index)
@@ -196,17 +198,16 @@ void* uploadFileThread(void* arg){
         }
     }
     is_running = 0;
+    delete args;
     return 0;
 }
 
 void uploadFile(char file_name[FILE_NAME_SIZE], int server_socket, struct sockaddr_in client_addr){
     operation_packet_t operation_packet;
+    socklen_t client_addr_len = sizeof(client_addr);
     is_running = 1;
     current_frame_index = 0;
     window_end_index = 0;
-
-    //Gets the client address.
-    received_client_addr = client_addr;
 
     string file_name_string = string(file_name);
     string file_path = FILE_PATH + file_name_string;
@@ -214,18 +215,37 @@ void uploadFile(char file_name[FILE_NAME_SIZE], int server_socket, struct sockad
     loadFramesFromFile(file_path.c_str(), frame_list_last_index);
 
     operation_packet.ftp_mode = DOWNLOAD;
-    strcpy(operation_packet.file_name,file_path.c_str());
+    strcpy(operation_packet.file_name, file_path.c_str());
     operation_packet.file_size_in_chunks = frame_list_last_index;
 
+    //Tells client that it's here and will send files.
     check(
         (sendto(server_socket, &operation_packet, sizeof(operation_packet_t), 0, (struct sockaddr*)&client_addr, sizeof(client_addr))),
         "Failed to send operation datagram.\n"
     );
 
+    //Waits for client to tell it's ready to receive files
+    check(
+        (recvfrom(server_socket, &operation_packet, sizeof(operation_packet_t), 0, (struct sockaddr*)&client_addr, &client_addr_len)),
+        "Failed to receive operation packet.\n"
+    );
+
     //Creates server packets to handle data packets
     for (size_t i = 0; i < WINDOW_SIZE; i++)
     {
-        if (pthread_create(&sliding_window[i], NULL, uploadFileThread, (void*)&i) != 0) {
+        // Create a struct to hold both the thread number and client address
+        struct ThreadArgs {
+            size_t thread_num;
+            struct sockaddr_in client_addr;
+        };
+
+        // Allocate memory for the struct
+        ThreadArgs* args = new ThreadArgs;
+        args->thread_num = i;
+        args->client_addr = client_addr;
+
+        // Pass the struct as an argument to the thread
+        if (pthread_create(&sliding_window[i], NULL, uploadFileThread, args) != 0) {
             perror("Error creating download thread.\n");
             return;
         }
